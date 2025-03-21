@@ -45,13 +45,13 @@ JOB_SEARCH = {
     "exclude_keywords": [
         "Senior", 
         "Lead", 
-        "10+ years", 
+        "2 years", 
         "Principal", 
         "Director", 
         "Manager",
         "15+ years"
     ],
-    "min_salary": 85000,  # Minimum salary to consider
+    "min_salary": 65000,  # Minimum salary to consider
     "max_applications_per_day": 15,  # Maximum applications to submit per day
     "filter_h1b_sponsors": True,  # Filter for H1B visa sponsors
 }
