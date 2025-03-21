@@ -1,19 +1,26 @@
 import logging
 import time
 import os
+import random
 from typing import Dict, Any, Optional
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, 
+    ElementClickInterceptedException, StaleElementReferenceException
+)
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+
+from src.utils.human_behavior import HumanBehavior
 
 logger = logging.getLogger(__name__)
 
 class JobApplier:
     """
-    Applies to jobs on various job boards.
+    Applies to jobs on various job boards with human-like behavior.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -30,34 +37,69 @@ class JobApplier:
         self.user_agent = self.browser_config.get('user_agent', '')
         self.headless = self.browser_config.get('headless', False)
         
+        # Initialize HumanBehavior helper
+        self.human = HumanBehavior()
+        
     def _setup_driver(self):
-        """Set up the Selenium WebDriver."""
+        """Set up the Selenium WebDriver with randomized browser fingerprint."""
         options = webdriver.ChromeOptions()
         if self.headless:
             options.add_argument('--headless')
-        if self.user_agent:
-            options.add_argument(f'user-agent={self.user_agent}')
+        
+        # Randomize user agent if not explicitly set in config
+        if not self.user_agent:
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.59",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0"
+            ]
+            self.user_agent = random.choice(user_agents)
+        
+        options.add_argument(f'user-agent={self.user_agent}')
+        
+        # Add randomized window dimensions to vary fingerprint
+        width = random.randint(1200, 1920)
+        height = random.randint(800, 1080)
         
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        
+        # Disable automation flags to avoid detection
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
         
         # Add preferences to handle downloads and file uploads
         prefs = {
             "download.default_directory": os.path.abspath("data_folder"),
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "safebrowsing.enabled": True
+            "safebrowsing.enabled": True,
+            # Disable saving passwords
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False
         }
         options.add_experimental_option("prefs", prefs)
         
         driver = webdriver.Chrome(options=options)
-        driver.set_window_size(1920, 1080)
+        
+        # Execute CDP commands to prevent detection
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+            """
+        })
+        
+        driver.set_window_size(width, height)
         return driver
     
     def apply(self, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str] = None) -> bool:
         """
-        Apply to a job.
+        Apply to a job with human-like interaction patterns.
         
         Args:
             job: Job listing dictionary
@@ -80,6 +122,11 @@ class JobApplier:
         
         if not job_url:
             logger.error("Job URL is missing")
+            return False
+        
+        # Double-check H1B sponsorship
+        if not job.get('sponsors_h1b', False):
+            logger.warning(f"Skipping job that doesn't sponsor H1B: {job.get('title', '')} at {job.get('company_name', '')}")
             return False
         
         # Get hiring manager information
@@ -123,91 +170,15 @@ class JobApplier:
             success = False
         
         finally:
+            # Random delay before closing to avoid patterns
+            HumanBehavior.random_delay(1.0, 3.0)
             driver.quit()
         
         return success
     
-    def _apply_linkedin(self, driver, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str]) -> bool:
-        """
-        Apply to a job on LinkedIn.
-        
-        Args:
-            driver: Selenium WebDriver
-            job: Job listing dictionary
-            resume_path: Path to resume file
-            cover_letter_path: Path to cover letter file
-            
-        Returns:
-            True if application was successful, False otherwise
-        """
-        try:
-            job_url = job.get('url', '')
-            
-            # First, log in to LinkedIn
-            self._linkedin_login(driver)
-            
-            # Navigate to the job page
-            driver.get(job_url)
-            logger.info(f"Navigated to job URL: {job_url}")
-            
-            # Wait for the page to load
-            time.sleep(3)
-            
-            # Check if already applied
-            try:
-                applied_button = driver.find_element(By.XPATH, "//button[contains(@aria-label, 'Applied')]")
-                if applied_button:
-                    logger.info("Already applied to this job")
-                    return True
-            except NoSuchElementException:
-                pass  # Not applied yet, continue
-            
-            # Try to find the Easy Apply button
-            try:
-                # Wait for the apply button to load
-                WebDriverWait(driver, self.timeout).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-control-name='jobdetails_topcard_inapply']"))
-                )
-                
-                # Click the apply button
-                apply_button = driver.find_element(By.CSS_SELECTOR, "button[data-control-name='jobdetails_topcard_inapply']")
-                apply_button.click()
-                logger.info("Clicked Easy Apply button")
-                
-                # Wait for the application form to load
-                WebDriverWait(driver, self.timeout).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.jobs-easy-apply-content"))
-                )
-                
-                # Handle the application process
-                return self._handle_linkedin_application_form(driver, job, resume_path, cover_letter_path)
-                
-            except (NoSuchElementException, TimeoutException):
-                # Try alternative apply button
-                try:
-                    apply_button = driver.find_element(By.CSS_SELECTOR, "button.jobs-apply-button")
-                    apply_button.click()
-                    logger.info("Clicked alternative Apply button")
-                    
-                    # Wait for the application form to load
-                    WebDriverWait(driver, self.timeout).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "div.jobs-easy-apply-content"))
-                    )
-                    
-                    # Handle the application process
-                    return self._handle_linkedin_application_form(driver, job, resume_path, cover_letter_path)
-                    
-                except (NoSuchElementException, TimeoutException):
-                    logger.error("Could not find Apply button")
-                    return False
-        
-        except Exception as e:
-            logger.error(f"Error applying on LinkedIn: {e}")
-            return False
-    
     def _linkedin_login(self, driver):
         """
-        Log in to LinkedIn.
+        Log in to LinkedIn with human-like behavior.
         
         Args:
             driver: Selenium WebDriver
@@ -217,25 +188,44 @@ class JobApplier:
             driver.get("https://www.linkedin.com/login")
             logger.info("Navigated to LinkedIn login page")
             
+            # Simulate reading the page for a bit
+            HumanBehavior.read_page_behavior(driver, (2, 4))
+            
             # Wait for the login form to load
             WebDriverWait(driver, self.timeout).until(
                 EC.presence_of_element_located((By.ID, "username"))
             )
             
-            # Enter credentials
+            # Enter credentials with human-like typing
             username_field = driver.find_element(By.ID, "username")
             password_field = driver.find_element(By.ID, "password")
             
-            username_field.send_keys(self.config.get('LINKEDIN', {}).get('username', ''))
-            password_field.send_keys(self.config.get('LINKEDIN', {}).get('password', ''))
+            # Type username with human-like behavior
+            HumanBehavior.human_like_typing(
+                username_field, 
+                self.config.get('LINKEDIN', {}).get('username', '')
+            )
             
-            # Submit the form
-            password_field.submit()
-            logger.info("Submitted LinkedIn login form")
+            # Pause briefly like a human would after entering username
+            HumanBehavior.random_delay(0.8, 1.5)
+            
+            # Type password with human-like behavior
+            HumanBehavior.human_like_typing(
+                password_field, 
+                self.config.get('LINKEDIN', {}).get('password', '')
+            )
+            
+            # Random delay before clicking submit to simulate human thinking
+            HumanBehavior.random_delay(0.5, 1.5)
+            
+            # Find and click the sign-in button with human-like movement
+            sign_in_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            HumanBehavior.human_like_click(driver, sign_in_button)
             
             # Wait for login to complete
             WebDriverWait(driver, self.timeout).until(
-                EC.presence_of_element_located((By.ID, "global-nav"))
+                EC.presence_of_element_located((By.ID, "global-nav")),
+                message="Login was not successful: Could not find global-nav element"
             )
             
             logger.info("Successfully logged in to LinkedIn")
@@ -259,16 +249,134 @@ class JobApplier:
                 
                 logger.info("LinkedIn security verification completed")
             
-            # Wait a moment for the page to fully load
-            time.sleep(2)
+            # "Browse" LinkedIn briefly to appear more human-like
+            self._simulate_normal_browsing(driver)
             
         except Exception as e:
             logger.error(f"Error logging in to LinkedIn: {e}")
             raise
     
+    def _simulate_normal_browsing(self, driver):
+        """
+        Simulate normal browsing behavior to appear more human-like.
+        
+        Args:
+            driver: Selenium WebDriver
+        """
+        try:
+            # Random chance to visit feed
+            if random.random() < 0.7:
+                driver.get("https://www.linkedin.com/feed/")
+                HumanBehavior.read_page_behavior(driver, (3, 6))
+                
+                # Scroll through feed
+                for _ in range(random.randint(2, 5)):
+                    HumanBehavior.scroll_page(driver, "down")
+            
+            # Random chance to visit notifications
+            if random.random() < 0.3:
+                driver.get("https://www.linkedin.com/notifications/")
+                HumanBehavior.read_page_behavior(driver, (2, 4))
+            
+            # Always visit jobs page at the end
+            driver.get("https://www.linkedin.com/jobs/")
+            HumanBehavior.read_page_behavior(driver, (2, 5))
+            
+        except Exception as e:
+            logger.warning(f"Error during normal browsing simulation: {e}")
+            # Non-critical function, so just log and continue
+    
+    def _apply_linkedin(self, driver, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str]) -> bool:
+        """
+        Apply to a job on LinkedIn with human-like behavior.
+        
+        Args:
+            driver: Selenium WebDriver
+            job: Job listing dictionary
+            resume_path: Path to resume file
+            cover_letter_path: Path to cover letter file
+            
+        Returns:
+            True if application was successful, False otherwise
+        """
+        try:
+            job_url = job.get('url', '')
+            
+            # First, log in to LinkedIn
+            self._linkedin_login(driver)
+            
+            # Navigate to the job page
+            logger.info(f"Navigating to job URL: {job_url}")
+            driver.get(job_url)
+            
+            # Simulate reading the job description
+            HumanBehavior.read_page_behavior(driver, (5, 12))
+            
+            # Check if already applied
+            try:
+                applied_button = driver.find_element(By.XPATH, "//button[contains(@aria-label, 'Applied')]")
+                if applied_button:
+                    logger.info("Already applied to this job")
+                    return True
+            except NoSuchElementException:
+                pass  # Not applied yet, continue
+            
+            # Try to find the Easy Apply button
+            try:
+                # Wait for the apply button to load
+                WebDriverWait(driver, self.timeout).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-control-name='jobdetails_topcard_inapply']"))
+                )
+                
+                # Find the apply button
+                apply_button = driver.find_element(By.CSS_SELECTOR, "button[data-control-name='jobdetails_topcard_inapply']")
+                
+                # Pause before clicking like a human would
+                HumanBehavior.random_delay(1.0, 2.5)
+                
+                # Click the apply button with human-like movement
+                HumanBehavior.human_like_click(driver, apply_button)
+                logger.info("Clicked Easy Apply button")
+                
+                # Wait for the application form to load
+                WebDriverWait(driver, self.timeout).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.jobs-easy-apply-content"))
+                )
+                
+                # Handle the application process
+                return self._handle_linkedin_application_form(driver, job, resume_path, cover_letter_path)
+                
+            except (NoSuchElementException, TimeoutException):
+                # Try alternative apply button
+                try:
+                    apply_button = driver.find_element(By.CSS_SELECTOR, "button.jobs-apply-button")
+                    
+                    # Pause before clicking
+                    HumanBehavior.random_delay(1.0, 2.0)
+                    
+                    # Click with human-like movement
+                    HumanBehavior.human_like_click(driver, apply_button)
+                    logger.info("Clicked alternative Apply button")
+                    
+                    # Wait for the application form to load
+                    WebDriverWait(driver, self.timeout).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "div.jobs-easy-apply-content"))
+                    )
+                    
+                    # Handle the application process
+                    return self._handle_linkedin_application_form(driver, job, resume_path, cover_letter_path)
+                    
+                except (NoSuchElementException, TimeoutException):
+                    logger.error("Could not find Apply button")
+                    return False
+        
+        except Exception as e:
+            logger.error(f"Error applying on LinkedIn: {e}")
+            return False
+    
     def _handle_linkedin_application_form(self, driver, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str]) -> bool:
         """
-        Handle the LinkedIn application form.
+        Handle the LinkedIn application form with human-like interactions.
         
         Args:
             driver: Selenium WebDriver
@@ -287,12 +395,22 @@ class JobApplier:
             while current_step <= max_steps:
                 logger.info(f"Handling application step {current_step}")
                 
+                # Simulate reading the form page
+                HumanBehavior.read_page_behavior(driver, (2, 5))
+                
                 # Check for resume upload
                 try:
                     resume_upload = driver.find_element(By.CSS_SELECTOR, "input[type='file'][name='resume']")
+                    
+                    # Pause before uploading
+                    HumanBehavior.random_delay(0.5, 1.5)
+                    
+                    # Upload file
                     resume_upload.send_keys(os.path.abspath(resume_path))
                     logger.info("Uploaded resume")
-                    time.sleep(2)  # Wait for upload to complete
+                    
+                    # Realistic wait time for upload to complete
+                    HumanBehavior.random_delay(2.0, 4.0)
                 except NoSuchElementException:
                     logger.debug("No resume upload field found in this step")
                 
@@ -300,24 +418,38 @@ class JobApplier:
                 if cover_letter_path:
                     try:
                         cover_letter_upload = driver.find_element(By.CSS_SELECTOR, "input[type='file'][name='coverLetter']")
+                        
+                        # Pause before uploading
+                        HumanBehavior.random_delay(0.5, 1.5)
+                        
+                        # Upload file
                         cover_letter_upload.send_keys(os.path.abspath(cover_letter_path))
                         logger.info("Uploaded cover letter")
-                        time.sleep(2)  # Wait for upload to complete
+                        
+                        # Realistic wait time for upload to complete
+                        HumanBehavior.random_delay(2.0, 4.0)
                     except NoSuchElementException:
                         logger.debug("No cover letter upload field found in this step")
                 
-                # Fill in contact information fields
+                # Fill in contact information fields in a human-like manner
                 self._fill_linkedin_contact_info(driver, job)
                 
-                # Fill in additional questions
-                self._fill_linkedin_additional_questions(driver, job)
+                # Fill in additional questions with human-like behavior
+                self._fill_linkedin_additional_questions(driver, job, cover_letter_path)
+                
+                # Add random pauses to simulate human thinking
+                HumanBehavior.random_delay(1.0, 3.0)
                 
                 # Check for "Next" button
                 try:
                     next_button = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Continue to next step']")
-                    next_button.click()
+                    
+                    # Human-like click
+                    HumanBehavior.human_like_click(driver, next_button)
                     logger.info("Clicked Next button")
-                    time.sleep(2)  # Wait for next step to load
+                    
+                    # Wait for next step to load with variable timing
+                    HumanBehavior.random_delay(2.0, 3.5)
                     current_step += 1
                     continue
                 except NoSuchElementException:
@@ -326,9 +458,17 @@ class JobApplier:
                 # Check for "Review" button
                 try:
                     review_button = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Review your application']")
-                    review_button.click()
+                    
+                    # Human-like click
+                    HumanBehavior.human_like_click(driver, review_button)
                     logger.info("Clicked Review button")
-                    time.sleep(2)  # Wait for review page to load
+                    
+                    # Wait for review page to load with variable timing
+                    HumanBehavior.random_delay(2.0, 4.0)
+                    
+                    # Simulate carefully reviewing the application
+                    HumanBehavior.read_page_behavior(driver, (3, 7))
+                    
                     current_step += 1
                     continue
                 except NoSuchElementException:
@@ -337,16 +477,23 @@ class JobApplier:
                 # Check for "Submit" button
                 try:
                     submit_button = driver.find_element(By.CSS_SELECTOR, "button[aria-label='Submit application']")
-                    submit_button.click()
+                    
+                    # Longer pause before submission as a human would take time to make final decision
+                    HumanBehavior.random_delay(2.0, 5.0)
+                    
+                    # Human-like click
+                    HumanBehavior.human_like_click(driver, submit_button)
                     logger.info("Clicked Submit button")
                     
-                    # Wait for confirmation
+                    # Wait for confirmation with longer timeout
                     try:
-                        WebDriverWait(driver, self.timeout).until(
-                            EC.presence_of_element_locate  self.timeout).until(
+                        WebDriverWait(driver, self.timeout * 2).until(
                             EC.presence_of_element_located((By.CSS_SELECTOR, "div.artdeco-inline-feedback--success"))
                         )
                         logger.info("Application submitted successfully")
+                        
+                        # Take a moment to "read" the success message
+                        HumanBehavior.random_delay(2.0, 4.0)
                         return True
                     except TimeoutException:
                         logger.warning("Could not confirm application submission")
@@ -363,9 +510,15 @@ class JobApplier:
                         try:
                             button_text = button.text.lower()
                             if "next" in button_text or "continue" in button_text or "submit" in button_text or "apply" in button_text:
-                                button.click()
+                                # Pause before clicking
+                                HumanBehavior.random_delay(1.0, 2.0)
+                                
+                                # Human-like click
+                                HumanBehavior.human_like_click(driver, button)
                                 logger.info(f"Clicked button with text: {button.text}")
-                                time.sleep(2)
+                                
+                                # Wait for next page with variable timing
+                                HumanBehavior.random_delay(2.0, 3.5)
                                 current_step += 1
                                 break
                         except:
@@ -388,48 +541,71 @@ class JobApplier:
     
     def _fill_linkedin_contact_info(self, driver, job: Dict[str, Any]):
         """
-        Fill in contact information fields in LinkedIn application form.
+        Fill in contact information fields in LinkedIn application form with human-like typing.
         
         Args:
             driver: Selenium WebDriver
             job: Job listing dictionary
         """
         try:
-            # Fill in name field
+            # Randomize the order of field filling to appear more human
+            fields_to_fill = []
+            
+            # Add first name field if found
             try:
                 name_field = driver.find_element(By.ID, "single-line-text-form-component-formElement-urn-li-jobs-applyformcommon-easyApplyFormElement-3-name-firstName")
-                name_field.clear()
-                name_field.send_keys(self.user_info.get('name', '').split()[0])
-                logger.info("Filled in first name")
+                if name_field:
+                    fields_to_fill.append(("first_name", name_field))
             except NoSuchElementException:
                 logger.debug("No first name field found")
             
-            # Fill in last name field
+            # Add last name field if found
             try:
                 last_name_field = driver.find_element(By.ID, "single-line-text-form-component-formElement-urn-li-jobs-applyformcommon-easyApplyFormElement-3-name-lastName")
-                last_name_field.clear()
-                last_name_field.send_keys(self.user_info.get('name', '').split()[-1])
-                logger.info("Filled in last name")
+                if last_name_field:
+                    fields_to_fill.append(("last_name", last_name_field))
             except NoSuchElementException:
                 logger.debug("No last name field found")
             
-            # Fill in email field
+            # Add email field if found
             try:
                 email_field = driver.find_element(By.ID, "single-line-text-form-component-formElement-urn-li-jobs-applyformcommon-easyApplyFormElement-3-email-email")
-                email_field.clear()
-                email_field.send_keys(self.user_info.get('email', ''))
-                logger.info("Filled in email")
+                if email_field:
+                    fields_to_fill.append(("email", email_field))
             except NoSuchElementException:
                 logger.debug("No email field found")
             
-            # Fill in phone field
+            # Add phone field if found
             try:
                 phone_field = driver.find_element(By.ID, "single-line-text-form-component-formElement-urn-li-jobs-applyformcommon-easyApplyFormElement-3-phoneNumber-nationalNumber")
-                phone_field.clear()
-                phone_field.send_keys(self.user_info.get('phone', ''))
-                logger.info("Filled in phone number")
+                if phone_field:
+                    fields_to_fill.append(("phone", phone_field))
             except NoSuchElementException:
                 logger.debug("No phone field found")
+            
+            # Shuffle the order of fields to fill for more human-like behavior
+            random.shuffle(fields_to_fill)
+            
+            # Fill each field with human-like typing
+            for field_type, field_element in fields_to_fill:
+                # Add random delay between filling fields
+                HumanBehavior.random_delay(0.5, 2.0)
+                
+                if field_type == "first_name":
+                    HumanBehavior.human_like_typing(field_element, self.user_info.get('name', '').split()[0])
+                    logger.info("Filled in first name")
+                
+                elif field_type == "last_name":
+                    HumanBehavior.human_like_typing(field_element, self.user_info.get('name', '').split()[-1])
+                    logger.info("Filled in last name")
+                
+                elif field_type == "email":
+                    HumanBehavior.human_like_typing(field_element, self.user_info.get('email', ''))
+                    logger.info("Filled in email")
+                
+                elif field_type == "phone":
+                    HumanBehavior.human_like_typing(field_element, self.user_info.get('phone', ''))
+                    logger.info("Filled in phone number")
             
             # Fill in hiring manager name if available
             hiring_manager_name = job.get('hiring_manager_name', '')
@@ -438,8 +614,10 @@ class JobApplier:
                     # Look for fields that might be for hiring manager
                     manager_fields = driver.find_elements(By.CSS_SELECTOR, "input[id*='hiring-manager'], input[id*='recruiter'], input[id*='addressee']")
                     if manager_fields:
-                        manager_fields[0].clear()
-                        manager_fields[0].send_keys(hiring_manager_name)
+                        # Add delay before filling this special field
+                        HumanBehavior.random_delay(1.0, 2.0)
+                        
+                        HumanBehavior.human_like_typing(manager_fields[0], hiring_manager_name)
                         logger.info("Filled in hiring manager name")
                 except:
                     logger.debug("Could not fill in hiring manager name")
@@ -447,102 +625,192 @@ class JobApplier:
         except Exception as e:
             logger.error(f"Error filling LinkedIn contact info: {e}")
     
-    def _fill_linkedin_additional_questions(self, driver, job: Dict[str, Any]):
+    def _fill_linkedin_additional_questions(self, driver, job: Dict[str, Any], cover_letter_path=None):
         """
-        Fill in additional questions in LinkedIn application form.
+        Fill in additional questions in LinkedIn application form with human-like interactions.
         
         Args:
             driver: Selenium WebDriver
             job: Job listing dictionary
+            cover_letter_path: Path to cover letter file
         """
         try:
             # Handle radio buttons for yes/no questions (usually select "Yes" for positive questions)
             try:
                 radio_buttons = driver.find_elements(By.CSS_SELECTOR, "input[type='radio'][value='Yes']")
-                for radio in radio_buttons:
-                    try:
-                        radio.click()
-                        logger.info("Selected 'Yes' for a radio button question")
-                    except:
-                        pass
+                
+                # Randomize order of radio button selection
+                if radio_buttons:
+                    random_indexes = list(range(len(radio_buttons)))
+                    random.shuffle(random_indexes)
+                    
+                    for idx in random_indexes:
+                        try:
+                            # Random delay before selecting each radio button
+                            HumanBehavior.random_delay(0.7, 2.0)
+                            
+                            # Human-like click
+                            HumanBehavior.human_like_click(driver, radio_buttons[idx])
+                            logger.info("Selected 'Yes' for a radio button question")
+                        except:
+                            pass
             except:
                 logger.debug("No radio buttons found")
             
             # Handle dropdown selects
             try:
                 selects = driver.find_elements(By.TAG_NAME, "select")
-                for select in selects:
-                    try:
-                        # Try to select the first non-empty option
-                        options = select.find_elements(By.TAG_NAME, "option")
-                        for option in options[1:]:  # Skip the first option (usually a placeholder)
-                            if option.text.strip():
-                                option.click()
-                                logger.info(f"Selected '{option.text}' from dropdown")
-                                break
-                    except:
-                        pass
+                
+                # Randomize order of dropdown interaction
+                if selects:
+                    random_indexes = list(range(len(selects)))
+                    random.shuffle(random_indexes)
+                    
+                    for idx in random_indexes:
+                        try:
+                            select = selects[idx]
+                            
+                            # Random delay before clicking dropdown
+                            HumanBehavior.random_delay(0.7, 2.0)
+                            
+                            # Human-like click to open dropdown
+                            HumanBehavior.human_like_click(driver, select)
+                            
+                            # Small delay as human would look at options
+                            HumanBehavior.random_delay(0.5, 1.5)
+                            
+                            # Try to select the first non-empty option
+                            options = select.find_elements(By.TAG_NAME, "option")
+                            
+                            # Skip the first option (usually a placeholder)
+                            valid_options = [opt for opt in options[1:] if opt.text.strip()]
+                            
+                            if valid_options:
+                                # Choose a random valid option sometimes instead of always the first one
+                                option_to_select = random.choice(valid_options)
+                                
+                                # Human-like click
+                                HumanBehavior.human_like_click(driver, option_to_select)
+                                logger.info(f"Selected '{option_to_select.text}' from dropdown")
+                                
+                                # Delay after selection
+                                HumanBehavior.random_delay(0.5, 1.0)
+                        except:
+                            pass
             except:
                 logger.debug("No dropdowns found")
             
             # Handle text inputs for work experience, education, etc.
             try:
                 text_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='text']:not([id*='name']):not([id*='email']):not([id*='phone'])")
-                for text_input in text_inputs:
-                    try:
-                        placeholder = text_input.get_attribute("placeholder") or ""
-                        label_elem = driver.find_element(By.CSS_SELECTOR, f"label[for='{text_input.get_attribute('id')}']")
-                        label = label_elem.text if label_elem else ""
-                        
-                        # Fill based on the field type
-                        if "years" in placeholder.lower() or "years" in label.lower() or "experience" in placeholder.lower() or "experience" in label.lower():
-                            text_input.clear()
-                            text_input.send_keys("3")
-                            logger.info("Filled in years of experience")
-                        elif "salary" in placeholder.lower() or "salary" in label.lower():
-                            text_input.clear()
-                            text_input.send_keys("90000")
-                            logger.info("Filled in salary expectation")
-                        elif "website" in placeholder.lower() or "website" in label.lower() or "portfolio" in placeholder.lower() or "portfolio" in label.lower():
-                            text_input.clear()
-                            text_input.send_keys(self.user_info.get('portfolio', ''))
-                            logger.info("Filled in website/portfolio")
-                        elif "linkedin" in placeholder.lower() or "linkedin" in label.lower():
-                            text_input.clear()
-                            text_input.send_keys(self.user_info.get('linkedin', ''))
-                            logger.info("Filled in LinkedIn URL")
-                        elif "github" in placeholder.lower() or "github" in label.lower():
-                            text_input.clear()
-                            text_input.send_keys(self.user_info.get('github', ''))
-                            logger.info("Filled in GitHub URL")
-                    except:
-                        pass
+                
+                # Randomize order of filling text inputs
+                if text_inputs:
+                    random_indexes = list(range(len(text_inputs)))
+                    random.shuffle(random_indexes)
+                    
+                    for idx in random_indexes:
+                        try:
+                            text_input = text_inputs[idx]
+                            placeholder = text_input.get_attribute("placeholder") or ""
+                            
+                            try:
+                                label_elem = driver.find_element(By.CSS_SELECTOR, f"label[for='{text_input.get_attribute('id')}']")
+                                label = label_elem.text if label_elem else ""
+                            except:
+                                label = ""
+                            
+                            # Add delay before filling each field
+                            HumanBehavior.random_delay(1.0, 2.5)
+                            
+                            # Fill based on the field type
+                            if "years" in placeholder.lower() or "years" in label.lower() or "experience" in placeholder.lower() or "experience" in label.lower():
+                                # Add some variation to years of experience
+                                years = str(random.randint(2, 5))
+                                HumanBehavior.human_like_typing(text_input, years)
+                                logger.info(f"Filled in years of experience: {years}")
+                            
+                            elif "salary" in placeholder.lower() or "salary" in label.lower():
+                                # Add some variation to salary expectations
+                                base_salary = 90000
+                                variation = random.randint(-5000, 5000)
+                                salary = str(base_salary + variation)
+                                HumanBehavior.human_like_typing(text_input, salary)
+                                logger.info(f"Filled in salary expectation: {salary}")
+                            
+                            elif "website" in placeholder.lower() or "website" in label.lower() or "portfolio" in placeholder.lower() or "portfolio" in label.lower():
+                                HumanBehavior.human_like_typing(text_input, self.user_info.get('portfolio', ''))
+                                logger.info("Filled in website/portfolio")
+                            
+                            elif "linkedin" in placeholder.lower() or "linkedin" in label.lower():
+                                HumanBehavior.human_like_typing(text_input, self.user_info.get('linkedin', ''))
+                                logger.info("Filled in LinkedIn URL")
+                            
+                            elif "github" in placeholder.lower() or "github" in label.lower():
+                                HumanBehavior.human_like_typing(text_input, self.user_info.get('github', ''))
+                                logger.info("Filled in GitHub URL")
+                        except:
+                            pass
             except:
                 logger.debug("No additional text inputs found")
             
             # Handle textareas for additional information
             try:
                 textareas = driver.find_elements(By.TAG_NAME, "textarea")
-                for textarea in textareas:
-                    try:
-                        placeholder = textarea.get_attribute("placeholder") or ""
-                        label_elem = driver.find_element(By.CSS_SELECTOR, f"label[for='{textarea.get_attribute('id')}']")
-                        label = label_elem.text if label_elem else ""
-                        
-                        # Fill based on the field type
-                        if "cover letter" in placeholder.lower() or "cover letter" in label.lower():
-                            if cover_letter_path:
-                                with open(cover_letter_path, 'r', encoding='utf-8') as f:
-                                    cover_letter_text = f.read()
-                                textarea.clear()
-                                textarea.send_keys(cover_letter_text)
-                                logger.info("Filled in cover letter text")
-                        elif "additional information" in placeholder.lower() or "additional information" in label.lower():
-                            textarea.clear()
-                            textarea.send_keys("I am very excited about this opportunity and believe my skills and experience make me a strong candidate for this role.")
-                            logger.info("Filled in additional information")
-                    except:
-                        pass
+                
+                # Randomize order of filling textareas
+                if textareas:
+                    random_indexes = list(range(len(textareas)))
+                    random.shuffle(random_indexes)
+                    
+                    for idx in random_indexes:
+                        try:
+                            textarea = textareas[idx]
+                            placeholder = textarea.get_attribute("placeholder") or ""
+                            
+                            try:
+                                label_elem = driver.find_element(By.CSS_SELECTOR, f"label[for='{textarea.get_attribute('id')}']")
+                                label = label_elem.text if label_elem else ""
+                            except:
+                                label = ""
+                            
+                            # Add longer delay before filling each textarea (they're usually more important)
+                            HumanBehavior.random_delay(1.5, 3.0)
+                            
+                            # Fill based on the field type
+                            if "cover letter" in placeholder.lower() or "cover letter" in label.lower():
+                                if cover_letter_path:
+                                    with open(cover_letter_path, 'r', encoding='utf-8') as f:
+                                        cover_letter_text = f.read()
+                                    
+                                    # Type cover letter with slower, more deliberate typing
+                                    HumanBehavior.human_like_typing(textarea, cover_letter_text, min_speed=0.03, max_speed=0.08)
+                                    logger.info("Filled in cover letter text")
+                            
+                            elif "additional information" in placeholder.lower() or "additional information" in label.lower():
+                                # Use one of several personalized responses for additional info
+                                additional_info_options = [
+                                    "I am very excited about this opportunity and believe my skills and experience make me a strong candidate for this role.",
+                                    "I've been following your company's work for some time and am particularly impressed with your recent projects. I believe my background would be a great fit for this position.",
+                                    "Thank you for considering my application. I'm passionate about this field and would welcome the opportunity to discuss how my experience aligns with your needs.",
+                                    "I'm particularly drawn to this role because it aligns with my professional goals and technical skills. I look forward to potentially joining your team."
+                                ]
+                                selected_info = random.choice(additional_info_options)
+                                
+                                # Add job-specific customization
+                                job_title = job.get('title', 'this position')
+                                company_name = job.get('company_name', 'your company')
+                                
+                                custom_info = f"I'm excited about the {job_title} role at {company_name} and believe my background makes me well-suited for this opportunity."
+                                
+                                # 50% chance to use custom info
+                                final_text = custom_info if random.random() < 0.5 else selected_info
+                                
+                                # Type additional info with human-like typing
+                                HumanBehavior.human_like_typing(textarea, final_text)
+                                logger.info("Filled in additional information")
+                        except:
+                            pass
             except:
                 logger.debug("No textareas found")
         
@@ -551,7 +819,7 @@ class JobApplier:
     
     def _apply_indeed(self, driver, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str]) -> bool:
         """
-        Apply to a job on Indeed.
+        Apply to a job on Indeed with human-like behavior.
         
         Args:
             driver: Selenium WebDriver
@@ -562,13 +830,13 @@ class JobApplier:
         Returns:
             True if application was successful, False otherwise
         """
-        # Implementation for Indeed application process
+        # Implementation for Indeed application process with human-like behavior
         # Similar structure to LinkedIn but with Indeed-specific selectors
         return True
     
     def _apply_ziprecruiter(self, driver, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str]) -> bool:
         """
-        Apply to a job on ZipRecruiter.
+        Apply to a job on ZipRecruiter with human-like behavior.
         
         Args:
             driver: Selenium WebDriver
@@ -579,7 +847,7 @@ class JobApplier:
         Returns:
             True if application was successful, False otherwise
         """
-        # Implementation for ZipRecruiter application process
+        # Implementation for ZipRecruiter application process with human-like behavior
         # Similar structure to LinkedIn but with ZipRecruiter-specific selectors
         return True
     
