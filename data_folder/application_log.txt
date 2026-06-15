@@ -1,0 +1,2 @@
+2025-03-21 16:29:18,368 - __main__ - ERROR - Resume file not found: data_folder/resume.pdf
+2025-03-21 18:00:03,281 - __main__ - ERROR - Resume file not found: data_folder/resume.pdf
