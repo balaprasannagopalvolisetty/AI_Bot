@@ -15,6 +15,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
 from src.utils.human_behavior import HumanBehavior
+from src.application.question_answerer import QuestionAnswerer
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,11 @@ class JobApplier:
         
         # Initialize HumanBehavior helper
         self.human = HumanBehavior()
+
+        # Intelligent application-form question answerer
+        self.qa_enabled = config.get('QUESTION_ANSWERING', {}).get('enabled', True)
+        self._qa = None
+        self._resume_text = None
         
     def _setup_driver(self):
         """Set up the Selenium WebDriver with randomized browser fingerprint."""
@@ -625,6 +631,185 @@ class JobApplier:
         except Exception as e:
             logger.error(f"Error filling LinkedIn contact info: {e}")
     
+    def _get_resume_text(self, resume_path: str) -> str:
+        """Extract plain text from the applicant's resume (cached)."""
+        if self._resume_text is not None:
+            return self._resume_text
+        text = ""
+        try:
+            if resume_path and os.path.exists(resume_path):
+                if resume_path.lower().endswith(".pdf"):
+                    from pypdf import PdfReader
+                    reader = PdfReader(resume_path)
+                    text = "\n".join((page.extract_text() or "") for page in reader.pages)
+                elif resume_path.lower().endswith((".docx", ".doc")):
+                    import docx2txt
+                    text = docx2txt.process(resume_path) or ""
+                else:
+                    with open(resume_path, "r", encoding="utf-8", errors="ignore") as f:
+                        text = f.read()
+        except Exception as e:
+            logger.debug(f"Could not extract resume text: {e}")
+        self._resume_text = text or ""
+        return self._resume_text
+
+    def _get_question_answerer(self, job: Dict[str, Any], resume_path: str = "") -> QuestionAnswerer:
+        """Lazily build (and reuse) the QuestionAnswerer for this run."""
+        if self._qa is None:
+            resume_text = self._get_resume_text(resume_path or self.user_info.get("resume_path", ""))
+            self._qa = QuestionAnswerer(self.config, resume_text=resume_text, job=job)
+        else:
+            # Keep the current job in context so company research stays relevant.
+            self._qa.job = job
+        return self._qa
+
+    def _extract_question_label(self, driver, element) -> str:
+        """Best-effort extraction of the human-readable question for a field."""
+        # 1) <label for="id">
+        try:
+            elem_id = element.get_attribute("id")
+            if elem_id:
+                label = driver.find_element(By.CSS_SELECTOR, f"label[for='{elem_id}']")
+                if label and label.text.strip():
+                    return label.text.strip()
+        except Exception:
+            pass
+        # 2) aria-label / aria-labelledby / placeholder / name
+        for attr in ("aria-label", "placeholder", "title", "name"):
+            try:
+                val = element.get_attribute(attr)
+                if val and val.strip():
+                    return val.strip()
+            except Exception:
+                pass
+        # 3) Walk up to an enclosing form-group and grab its label/legend text
+        try:
+            container = element.find_element(
+                By.XPATH,
+                "ancestor::*[self::div or self::fieldset][.//label or .//legend][1]",
+            )
+            for sel in ("legend", "label"):
+                try:
+                    lab = container.find_element(By.TAG_NAME, sel)
+                    if lab and lab.text.strip():
+                        return lab.text.strip()
+                except Exception:
+                    continue
+            if container.text.strip():
+                return container.text.strip().split("\n")[0]
+        except Exception:
+            pass
+        return ""
+
+    def _answer_form_questions(self, driver, job: Dict[str, Any], resume_path: str = "") -> int:
+        """
+        Scan the current application form and intelligently answer every
+        question (text, number, textarea, select, radio group) using the
+        QuestionAnswerer. Returns the number of fields filled.
+
+        This is detection-safe: it skips fields that already have a value and
+        types answers with human-like behavior.
+        """
+        if not self.qa_enabled:
+            return 0
+
+        qa = self._get_question_answerer(job, resume_path)
+        filled = 0
+
+        # --- Text / number inputs and textareas ---
+        try:
+            fields = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='number'], input[type='url'], textarea")
+            for field in fields:
+                try:
+                    if not field.is_displayed() or not field.is_enabled():
+                        continue
+                    if (field.get_attribute("value") or "").strip():
+                        continue  # already filled (e.g., prefilled contact info)
+                    question = self._extract_question_label(driver, field)
+                    if not question:
+                        continue
+                    tag = field.tag_name.lower()
+                    itype = "textarea" if tag == "textarea" else (
+                        "number" if field.get_attribute("type") == "number" else "text"
+                    )
+                    answer = qa.answer(question, input_type=itype)
+                    if answer:
+                        HumanBehavior.random_delay(0.6, 1.8)
+                        HumanBehavior.human_like_typing(field, str(answer))
+                        filled += 1
+                except Exception as e:
+                    logger.debug(f"Could not answer text field: {e}")
+        except Exception as e:
+            logger.debug(f"No text fields to answer: {e}")
+
+        # --- Dropdown selects ---
+        try:
+            from selenium.webdriver.support.ui import Select
+            for select_el in driver.find_elements(By.TAG_NAME, "select"):
+                try:
+                    if not select_el.is_displayed() or not select_el.is_enabled():
+                        continue
+                    question = self._extract_question_label(driver, select_el)
+                    options = [
+                        o.text.strip()
+                        for o in select_el.find_elements(By.TAG_NAME, "option")
+                        if o.text.strip()
+                    ]
+                    # Skip if a non-placeholder option is already selected
+                    sel = Select(select_el)
+                    current = (sel.first_selected_option.text or "").strip().lower()
+                    if current and current not in ("select an option", "select", "-", "please select"):
+                        continue
+                    if not options:
+                        continue
+                    answer = qa.answer(question or "Select an option", input_type="select", options=options)
+                    HumanBehavior.random_delay(0.6, 1.6)
+                    try:
+                        sel.select_by_visible_text(answer)
+                    except Exception:
+                        sel.select_by_index(1 if len(options) > 1 else 0)
+                    filled += 1
+                except Exception as e:
+                    logger.debug(f"Could not answer select: {e}")
+        except Exception as e:
+            logger.debug(f"No selects to answer: {e}")
+
+        # --- Radio button groups (group by name) ---
+        try:
+            radios = driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            groups: Dict[str, list] = {}
+            for r in radios:
+                name = r.get_attribute("name") or ""
+                groups.setdefault(name, []).append(r)
+            for name, buttons in groups.items():
+                try:
+                    if any(b.is_selected() for b in buttons):
+                        continue  # already answered
+                    # Build question + option texts from associated labels
+                    question = ""
+                    option_map = {}
+                    for b in buttons:
+                        label = self._extract_question_label(driver, b) or (b.get_attribute("value") or "")
+                        option_map[label] = b
+                        if not question:
+                            question = self._extract_question_label(driver, b)
+                    options = [o for o in option_map.keys() if o]
+                    if not options:
+                        continue
+                    answer = qa.answer(question or "Please choose", input_type="radio", options=options)
+                    target = option_map.get(answer) or buttons[0]
+                    HumanBehavior.random_delay(0.6, 1.6)
+                    HumanBehavior.human_like_click(driver, target)
+                    filled += 1
+                except Exception as e:
+                    logger.debug(f"Could not answer radio group: {e}")
+        except Exception as e:
+            logger.debug(f"No radio groups to answer: {e}")
+
+        if filled:
+            logger.info(f"Intelligently answered {filled} application-form question(s)")
+        return filled
+
     def _fill_linkedin_additional_questions(self, driver, job: Dict[str, Any], cover_letter_path=None):
         """
         Fill in additional questions in LinkedIn application form with human-like interactions.
@@ -635,6 +820,15 @@ class JobApplier:
             cover_letter_path: Path to cover letter file
         """
         try:
+            # First pass: intelligently answer every detectable question using the
+            # AI-backed QuestionAnswerer (work auth, sponsorship, experience, salary,
+            # "why this company", etc.). The legacy heuristics below only act as a
+            # fallback for any field the answerer could not resolve.
+            try:
+                self._answer_form_questions(driver, job)
+            except Exception as e:
+                logger.debug(f"Intelligent question answering pass failed: {e}")
+
             # Handle radio buttons for yes/no questions (usually select "Yes" for positive questions)
             try:
                 radio_buttons = driver.find_elements(By.CSS_SELECTOR, "input[type='radio'][value='Yes']")
@@ -830,9 +1024,9 @@ class JobApplier:
         Returns:
             True if application was successful, False otherwise
         """
-        # Implementation for Indeed application process with human-like behavior
-        # Similar structure to LinkedIn but with Indeed-specific selectors
-        return True
+        # Indeed uses a multi-step "Apply now" flow. We run a generic, board-agnostic
+        # form filler that intelligently answers each step's questions.
+        return self._apply_generic(driver, job, resume_path, cover_letter_path, source="Indeed")
     
     def _apply_ziprecruiter(self, driver, job: Dict[str, Any], resume_path: str, cover_letter_path: Optional[str]) -> bool:
         """
@@ -847,10 +1041,87 @@ class JobApplier:
         Returns:
             True if application was successful, False otherwise
         """
-        # Implementation for ZipRecruiter application process with human-like behavior
-        # Similar structure to LinkedIn but with ZipRecruiter-specific selectors
-        return True
+        # ZipRecruiter 1-Click / Quick Apply flow. We run the same generic,
+        # board-agnostic form filler used for Indeed.
+        return self._apply_generic(driver, job, resume_path, cover_letter_path, source="ZipRecruiter")
     
+    def _apply_generic(self, driver, job: Dict[str, Any], resume_path: str,
+                       cover_letter_path: Optional[str], source: str = "") -> bool:
+        """
+        Board-agnostic multi-step application filler.
+
+        Walks through a typical ATS/quick-apply flow: on each step it uploads the
+        resume if a file input is present, intelligently answers all visible
+        questions, then clicks the Continue/Next/Submit button. It stops when a
+        submit/review action is taken or no further navigation button is found.
+        """
+        try:
+            job_url = job.get("url", "")
+            if job_url:
+                driver.get(job_url)
+                HumanBehavior.random_delay(2.0, 4.0)
+
+            # Click an "Apply"/"Easy Apply"/"Quick Apply" button if present.
+            apply_xpaths = [
+                "//button[contains(translate(., 'APPLY', 'apply'), 'apply')]",
+                "//a[contains(translate(., 'APPLY', 'apply'), 'apply')]",
+            ]
+            for xp in apply_xpaths:
+                try:
+                    btn = driver.find_element(By.XPATH, xp)
+                    if btn.is_displayed():
+                        HumanBehavior.human_like_click(driver, btn)
+                        HumanBehavior.random_delay(1.5, 3.0)
+                        break
+                except Exception:
+                    continue
+
+            max_steps = 12
+            for _ in range(max_steps):
+                # Upload resume if a file input is present and empty.
+                try:
+                    for file_input in driver.find_elements(By.CSS_SELECTOR, "input[type='file']"):
+                        if file_input.is_enabled() and resume_path and os.path.exists(resume_path):
+                            file_input.send_keys(os.path.abspath(resume_path))
+                            HumanBehavior.random_delay(1.0, 2.0)
+                except Exception as e:
+                    logger.debug(f"No resume upload on this step: {e}")
+
+                # Answer every question on the current step.
+                self._answer_form_questions(driver, job, resume_path)
+
+                # Find the next navigation button.
+                nav = None
+                nav_labels = ["submit application", "submit", "review", "continue", "next"]
+                for label in nav_labels:
+                    try:
+                        nav = driver.find_element(
+                            By.XPATH,
+                            f"//button[contains(translate(normalize-space(.), "
+                            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{label}')]",
+                        )
+                        if nav and nav.is_displayed() and nav.is_enabled():
+                            break
+                        nav = None
+                    except Exception:
+                        nav = None
+                if not nav:
+                    logger.info(f"{source}: no further navigation button; ending flow")
+                    break
+
+                is_submit = any(k in (nav.text or "").lower() for k in ("submit", "review"))
+                HumanBehavior.random_delay(0.8, 2.0)
+                HumanBehavior.human_like_click(driver, nav)
+                HumanBehavior.random_delay(1.5, 3.0)
+                if is_submit:
+                    logger.info(f"{source}: submitted application for {job.get('title', '')}")
+                    return True
+
+            return True
+        except Exception as e:
+            logger.error(f"Error in generic application flow ({source}): {e}")
+            return False
+
     def _record_application(self, job: Dict[str, Any]):
         """
         Record a successful application.

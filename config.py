@@ -116,7 +116,7 @@ APPLICATION = {
 
 # AI Settings
 AI_SETTINGS = {
-  "model": "gpt-4",  # Options: "gpt-3.5-turbo", "gpt-4"
+  "model": "gpt-4o-mini",  # Options: "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"
   "resume_match_threshold": 0.65,  # Minimum match score to apply (0.0 to 1.0)
   "api_key": "",  # Your OpenAI API key
 }
@@ -146,4 +146,24 @@ EMAIL = {
 LINKEDIN = {
   "username": "",  # Your LinkedIn username/email
   "password": "",  # Your LinkedIn password
+}
+
+# Application Form Question Answering
+# Controls how the AI answers arbitrary screening/application-form questions
+# (work authorization, years of experience, salary, "why this company", etc.).
+QUESTION_ANSWERING = {
+  "enabled": True,             # Use the intelligent answerer to fill form questions
+  "research_company": True,    # Pull job description / company site context for open-ended answers
+  "authorized_to_work": True,  # Are you legally authorized to work in the US?
+  "requires_sponsorship": True,# Do you now or in the future need visa sponsorship?
+  "default_years_experience": 3,
+  "desired_salary": 90000,
+  "willing_to_relocate": True,
+  "notice_period": "2 weeks",
+  "start_date": "Immediately / 2 weeks notice",
+  # EEO / diversity questions — privacy-preserving defaults (edit if you prefer to disclose)
+  "gender": "Decline to self-identify",
+  "race": "Decline to self-identify",
+  "veteran_status": "I am not a protected veteran",
+  "disability_status": "I do not wish to answer",
 }

@@ -1,8 +1,8 @@
 import os
 import logging
-import openai
+from src.utils.ai_client import AIClient
 from typing import Dict, Any
-import PyPDF2
+from pypdf import PdfReader
 from docx import Document
 from docx.shared import Pt
 import re
@@ -28,9 +28,8 @@ class ResumeCustomizer:
         self.api_key = self.ai_settings.get('api_key', '')
         self.model = self.ai_settings.get('model', 'gpt-4')
         
-        # Set up OpenAI API key
-        if self.api_key:
-            openai.api_key = self.api_key
+        # Shared OpenAI client (openai>=1.0 SDK)
+        self.ai = AIClient(config)
         
     def customize(self, job: Dict[str, Any]) -> str:
         """
@@ -104,7 +103,7 @@ class ResumeCustomizer:
             if file_ext == '.pdf':
                 # Extract text from PDF
                 with open(self.resume_path, 'rb') as file:
-                    reader = PyPDF2.PdfReader(file)
+                    reader = PdfReader(file)
                     content = ""
                     for page in reader.pages:
                         content += page.extract_text()
@@ -229,17 +228,12 @@ class ResumeCustomizer:
                     Return only the customized {section_name} section text, starting with the section header.
                     """
                     
-                    response = openai.ChatCompletion.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": f"You are an expert resume customizer focusing on {section_name}."},
-                            {"role": "user", "content": prompt}
-                        ],
+                    customized_section = self.ai.chat(
+                        system=f"You are an expert resume customizer focusing on {section_name}.",
+                        user=prompt,
                         max_tokens=2000,
-                        temperature=0.5
+                        temperature=0.5,
                     )
-                    
-                    customized_section = response.choices[0].message.content.strip()
                     customized_sections[section_name] = customized_section
             
             return customized_sections

@@ -64,7 +64,7 @@ class ResumeMatcher:
             Extracted text
         """
         try:
-            from PyPDF2 import PdfReader
+            from pypdf import PdfReader
             
             reader = PdfReader(file_path)
             text = ""

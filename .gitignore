@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / local config
+.env
+
+# Generated data
+data_folder/resumes/
+data_folder/cover_letters/
+data_folder/applications/
+data_folder/follow_ups/
+data_folder/answer_cache.json
+data_folder/jobs_*.json
+data_folder/*.log

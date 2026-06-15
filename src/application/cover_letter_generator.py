@@ -1,6 +1,7 @@
 import os
+import time
 import logging
-import openai
+from src.utils.ai_client import AIClient
 from typing import Dict, Any
 import re
 
@@ -24,9 +25,8 @@ class CoverLetterGenerator:
         self.api_key = self.ai_settings.get('api_key', '')
         self.model = self.ai_settings.get('model', 'gpt-4')
         
-        # Set up OpenAI API key
-        if self.api_key:
-            openai.api_key = self.api_key
+        # Shared OpenAI client (openai>=1.0 SDK)
+        self.ai = AIClient(config)
         
     def generate(self, job: Dict[str, Any]) -> str:
         """
@@ -139,17 +139,12 @@ class CoverLetterGenerator:
             Return only the cover letter text.
             """
             
-            response = openai.ChatCompletion.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert cover letter writer who creates highly personalized, compelling cover letters."},
-                    {"role": "user", "content": prompt}
-                ],
+            cover_letter_content = self.ai.chat(
+                system="You are an expert cover letter writer who creates highly personalized, compelling cover letters.",
+                user=prompt,
                 max_tokens=2000,
-                temperature=0.7
+                temperature=0.7,
             )
-            
-            cover_letter_content = response.choices[0].message.content.strip()
             return cover_letter_content
         
         except Exception as e:
@@ -175,17 +170,12 @@ class CoverLetterGenerator:
             {job_description}
             """
             
-            response = openai.ChatCompletion.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at analyzing job descriptions."},
-                    {"role": "user", "content": prompt}
-                ],
+            key_requirements = self.ai.chat(
+                system="You are an expert at analyzing job descriptions.",
+                user=prompt,
                 max_tokens=1000,
-                temperature=0.3
+                temperature=0.3,
             )
-            
-            key_requirements = response.choices[0].message.content.strip()
             return key_requirements
         
         except Exception as e:
